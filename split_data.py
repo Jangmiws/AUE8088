@@ -32,7 +32,7 @@ try:
             f.write(line + '\n')
     print(f"'{output_train_file}' ({len(train_lines)} images) created successfully.")
 
-    # 새로운 검증 파일 저장
+    # 새로운 검증 파일 저장 
     with open(output_val_file, 'w') as f:
         for line in val_lines:
             f.write(line + '\n')
