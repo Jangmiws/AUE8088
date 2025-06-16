@@ -173,7 +173,7 @@ def create_dataloader(
     prefix="",
     shuffle=False,
     seed=0,
-    rgbt_input=False,
+    rgbt_input=True #False,
 ):
     if rect and shuffle:
         LOGGER.warning("WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False")
@@ -1064,6 +1064,7 @@ class LoadImagesAndLabels(Dataset):
         return torch.stack(im4, 0), torch.cat(label4, 0), path4, shapes4, indices4
 
 
+# 문제점 : 일반적인 data augmentation 라이브러리가 각 이미지에 대해 독립적으로 랜덤 변환을 적용한다. (RGB, 열화상)
 class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
     cache_version = 0.2  # dataset labels *.cache version
     modalities = ('lwir', 'visible')
@@ -1202,85 +1203,91 @@ class LoadRGBTImagesAndLabels(LoadImagesAndLabels):
         if mosaic:
             raise NotImplementedError('Please make "mosaic" augmentation work!')
 
-            # TODO: Load mosaic
-            img, labels = self.load_mosaic(index)
-            shapes = None
-
-            # TODO: MixUp augmentation
-            if random.random() < hyp["mixup"]:
-                img, labels = mixup(img, labels, *self.load_mosaic(random.choice(self.indices)))
-
         else:
             # Load image
             # hw0s: original shapes, hw1s: resized shapes
-            imgs, hw0s, hw1s = self.load_image(index)
+            imgs, (h0s, w0s), hw1s = self.load_image(index)
+            lwir_img, vis_img = imgs
+            h0, w0 = h0s[0], w0s[0]  # assumes both images have same dimensions
+            h, w = hw1s[0]
 
-            for ii, (img, (h0, w0), (h, w)) in enumerate(zip(imgs, hw0s, hw1s)):
-                # Letterbox
-                shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
-                img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
-                shapes = (h0, w0), (ratio, pad)  # for COCO mAP rescaling
+            # Letterbox
+            shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            lwir_img, ratio, pad = letterbox(lwir_img, shape, auto=False, scaleup=self.augment)
+            vis_img, _, _ = letterbox(vis_img, shape, auto=False, scaleup=self.augment) # Use same letterbox parameters
+            shapes = (h0, w0), (ratio, pad)  # for COCO mAP rescaling
 
-                labels = self.labels[index].copy()
-                if labels.size:  # normalized xywh to pixel xyxy format
-                    labels[:, 1:3] += labels[:, 3:5] / 2.0      # (x_lefttop, y_lefttop) -> (x_center, y_center)
-                    labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+            labels = self.labels[index].copy()
+            if labels.size:  # normalized xywh to pixel xyxy format
+                labels[:, 1] += labels[:, 3] / 2.0  # top-left x to center x
+                labels[:, 2] += labels[:, 4] / 2.0  # top-left y to center y
+                labels[:, 1:5] = xywhn2xyxy(labels[:, 1:5], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
-                if self.augment:
-                    raise NotImplementedError('Please make data augmentation work!')
+            if self.augment:
+                # Apply same geometric augmentations to both images
+                # Concatenate along channel axis
+                combined_img = np.concatenate((lwir_img, vis_img), axis=2)
 
-                    img, labels = random_perspective(
-                        img,
-                        labels,
-                        degrees=hyp["degrees"],
-                        translate=hyp["translate"],
-                        scale=hyp["scale"],
-                        shear=hyp["shear"],
-                        perspective=hyp["perspective"],
-                    )
+                combined_img, labels = random_perspective(
+                    combined_img,
+                    labels,
+                    degrees=hyp["degrees"],
+                    translate=hyp["translate"],
+                    scale=hyp["scale"],
+                    shear=hyp["shear"],
+                    perspective=hyp["perspective"],
+                )
+                
+                # Split back into lwir and vis images
+                lwir_img, vis_img = combined_img[..., :3], combined_img[..., 3:]
 
-                nl = len(labels)  # number of labels
-                if nl:
-                    labels[:, 1:5] = xyxy2xywhn(labels[:, 1:5], w=img.shape[1], h=img.shape[0], clip=True, eps=1e-3)
+            nl = len(labels)  # number of labels
+            if nl:
+                labels[:, 1:5] = xyxy2xywhn(labels[:, 1:5], w=lwir_img.shape[1], h=lwir_img.shape[0], clip=True, eps=1e-3)
 
-                if self.augment:
-                    # Albumentations
-                    img, labels = self.albumentations(img, labels)
+            if self.augment:
+                # Albumentations (applied synchronously)
+                if self.albumentations:
+                    combined_img = np.concatenate((lwir_img, vis_img), axis=2)
+                    # Note: This assumes albumentations pipeline works on 6-channel images
+                    combined_img, labels = self.albumentations(combined_img, labels)
+                    lwir_img, vis_img = combined_img[..., :3], combined_img[..., 3:]
                     nl = len(labels)  # update after albumentations
 
-                    # HSV color-space
-                    augment_hsv(img, hgain=hyp["hsv_h"], sgain=hyp["hsv_s"], vgain=hyp["hsv_v"])
+                # HSV color-space augmentation (only for visible image)
+                vis_img = np.ascontiguousarray(vis_img)
+                augment_hsv(vis_img, hgain=hyp["hsv_h"], sgain=hyp["hsv_s"], vgain=hyp["hsv_v"])
 
-                    # Flip up-down
-                    if random.random() < hyp["flipud"]:
-                        img = np.flipud(img)
-                        if nl:
-                            labels[:, 2] = 1 - labels[:, 2]
+                # Synchronized Flips
+                if random.random() < hyp["flipud"]:
+                    lwir_img = np.flipud(lwir_img)
+                    vis_img = np.flipud(vis_img)
+                    if nl:
+                        labels[:, 2] = 1 - labels[:, 2]
 
-                    # Flip left-right
-                    if random.random() < hyp["fliplr"]:
-                        img = np.fliplr(img)
-                        if nl:
-                            labels[:, 1] = 1 - labels[:, 1]
+                if random.random() < hyp["fliplr"]:
+                    lwir_img = np.fliplr(lwir_img)
+                    vis_img = np.fliplr(vis_img)
+                    if nl:
+                        labels[:, 1] = 1 - labels[:, 1]
 
-                    # Cutouts
-                    # labels = cutout(img, labels, p=0.5)
-                    # nl = len(labels)  # update after cutout
+            labels_out = torch.zeros((nl, 7))
+            if nl:
+                labels_out[:, 1:] = torch.from_numpy(labels)
 
-                labels_out = torch.zeros((nl, 7))
-                if nl:
-                    labels_out[:, 1:] = torch.from_numpy(labels)
-
-                # Convert
-                img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
-                img = np.ascontiguousarray(img)
-
-                imgs[ii] = torch.from_numpy(img)
+            # Convert
+            lwir_img = lwir_img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            lwir_img = np.ascontiguousarray(lwir_img)
+            vis_img = vis_img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            vis_img = np.ascontiguousarray(vis_img)
+            imgs = (torch.from_numpy(lwir_img), torch.from_numpy(vis_img))
 
         # Drop occlusion level
         labels_out = labels_out[:, :-1]
         return imgs, labels_out, self.im_files[index], shapes, index
 
+
+    
     def load_image(self, i):
         """
         Loads an image by index, returning the image, its original dimensions, and resized dimensions.

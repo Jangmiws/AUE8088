@@ -167,15 +167,32 @@ class ComputeLoss:
                 # do not calculate objectness loss
                 ign_idx = (tcls[i] == -1) & (iou > self.hyp["iou_t"])
                 keep = ~ign_idx
-                b, a, gj, gi, iou = b[keep], a[keep], gj[keep], gi[keep], iou[keep]
+                #b, a, gj, gi, iou = b[keep], a[keep], gj[keep], gi[keep], iou[keep]
+                if keep.all():
+                    b, a, gj, gi, iou, tcls_ = b, a, gj, gi, iou, tcls[i]
+                else:
+                    b, a, gj, gi, iou, tcls_ = b[keep], a[keep], gj[keep], gi[keep], iou[keep], tcls[i][keep]
+
 
                 tobj[b, a, gj, gi] = iou  # iou ratio
 
                 # Classification
                 if self.nc > 1:  # cls loss (only if multiple classes)
-                    t = torch.full_like(pcls, self.cn, device=self.device)  # targets
-                    t[range(n), tcls[i]] = self.cp
-                    lcls += self.BCEcls(pcls, t)  # BCE
+                    #t = torch.full_like(pcls, self.cn, device=self.device)  # targets
+                    #t[range(n), tcls[i]] = self.cp
+                    #lcls += self.BCEcls(pcls, t)  # BCE
+                    cls_mask = (tcls_ >= 0) & (tcls_ < 2) # Only use classes 0 and 1 for classification loss
+
+                    if cls_mask.any():
+                        # Filter predictions and targets based on the mask
+                        pcls_filtered = pcls[keep][cls_mask]
+                        tcls_filtered = tcls_[cls_mask]
+
+                        # If there are any targets left after filtering
+                        if pcls_filtered.shape[0] > 0:
+                            t = torch.full_like(pcls_filtered, self.cn, device=self.device)  # targets
+                            t[range(pcls_filtered.shape[0]), tcls_filtered] = self.cp
+                            lcls += self.BCEcls(pcls_filtered, t)  # BCE
 
                 # Append targets to text file
                 # with open('targets.txt', 'a') as file:

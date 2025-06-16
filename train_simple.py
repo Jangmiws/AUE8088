@@ -185,7 +185,7 @@ def train(hyp, opt, device, callbacks):
         gs,
         single_cls,
         hyp=hyp,
-        augment=False,      # TODO: make it work
+        augment=opt.augment,      # TODO: make it work
         cache=None if opt.cache == "val" else opt.cache,
         rect=opt.rect,
         rank=-1,
@@ -424,6 +424,7 @@ def parse_opt(known=False):
     parser.add_argument("--nosave", action="store_true", help="only save final checkpoint")
     parser.add_argument("--noval", action="store_true", help="only validate final epoch")
     parser.add_argument("--noautoanchor", action="store_true", help="disable AutoAnchor")
+    parser.add_argument("--augment", action="store_true", help="augmented data loading")
     parser.add_argument("--noplots", action="store_true", help="save no plot files")
     parser.add_argument("--evolve", type=int, nargs="?", const=300, help="evolve hyperparameters for x generations")
     parser.add_argument(
